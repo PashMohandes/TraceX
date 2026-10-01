@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<!--
+  ThreadX TraceX web viewer — self-contained, no build, no server.
+  Open this file in a browser (or VS Code Live Preview) and drag a .trx onto it.
+
+  Parses the native TraceX binary in-browser and reuses TraceX's own event
+  semantics (names / icons / colors / info-field meanings) from events.js, which
+  is generated from third_party/tracex by tools/gen_event_defs.py.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ThreadX TraceX Viewer</title>
+<script src="events.js"></script>
+<style>
+  :root {
+    --bg:#1e2227; --panel:#272c33; --panel2:#2f353d; --line:#3a414a;
+    --fg:#e6e9ee; --muted:#9aa4b1; --accent:#4e9bff; --sel:#ffb454;
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,Segoe UI,Roboto,sans-serif; font-size:13px; }
+  #app { display:flex; flex-direction:column; height:100%; }
+  header { display:flex; align-items:center; gap:14px; padding:8px 14px;
+    background:var(--panel); border-bottom:1px solid var(--line); flex:0 0 auto; }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  header .spacer { flex:1; }
+  .ctl { display:flex; align-items:center; gap:6px; color:var(--muted); }
+  .ctl input[type=number] { width:56px; background:var(--panel2); color:var(--fg);
+    border:1px solid var(--line); border-radius:4px; padding:3px 5px; }
+  button { background:var(--panel2); color:var(--fg); border:1px solid var(--line);
+    border-radius:4px; padding:4px 10px; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  #summary { color:var(--muted); font-family:ui-monospace,Menlo,monospace; font-size:12px; }
+  .tabs { display:flex; gap:2px; padding:6px 14px 0; background:var(--panel);
+    border-bottom:1px solid var(--line); flex:0 0 auto; }
+  .tab { padding:7px 16px; cursor:pointer; border:1px solid transparent;
+    border-bottom:none; border-radius:6px 6px 0 0; color:var(--muted); }
+  .tab.active { background:var(--bg); color:var(--fg); border-color:var(--line); }
+  main { flex:1; display:flex; min-height:0; }
+  #views { flex:1; min-width:0; position:relative; }
+  .view { position:absolute; inset:0; overflow:auto; display:none; }
+  .view.active { display:block; }
+  /* Drop zone */
+  #drop { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    flex-direction:column; gap:10px; color:var(--muted); text-align:center; z-index:5; }
+  #drop.hidden { display:none; }
+  #drop .big { font-size:20px; color:var(--fg); }
+  #drop.hover { background:rgba(78,155,255,0.08); outline:2px dashed var(--accent); outline-offset:-16px; }
+  /* Timeline */
+  #tlWrap { position:absolute; inset:0; }
+  #timeline { display:block; width:100%; height:100%; cursor:crosshair; }
+  #tip { position:fixed; pointer-events:none; background:#000d; color:#fff; padding:6px 8px;
+    border-radius:5px; font-family:ui-monospace,Menlo,monospace; font-size:11px; max-width:340px;
+    z-index:20; display:none; white-space:pre; border:1px solid #555; }
+  .hint { position:absolute; bottom:8px; left:12px; color:var(--muted); font-size:11px; }
+  /* Tables */
+  table { border-collapse:collapse; width:100%; font-family:ui-monospace,Menlo,monospace; font-size:12px; }
+  th,td { text-align:left; padding:4px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { position:sticky; top:0; background:var(--panel); color:var(--muted); z-index:1; }
+  tbody tr:hover { background:var(--panel2); cursor:pointer; }
+  tbody tr.sel { background:rgba(255,180,84,0.18); }
+  .icon { display:inline-block; min-width:22px; text-align:center; border-radius:3px;
+    padding:0 4px; color:#000; font-weight:700; font-size:10px; }
+  .stat-grid { padding:14px; display:flex; flex-wrap:wrap; gap:18px; align-items:flex-start; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  .card h3 { margin:0 0 8px; font-size:13px; }
+  .bar { height:8px; border-radius:4px; background:var(--accent); }
+  /* Details panel */
+  #details { flex:0 0 320px; background:var(--panel); border-left:1px solid var(--line);
+    overflow:auto; padding:12px 14px; }
+  #details h3 { margin:0 0 4px; font-size:14px; }
+  #details .sub { color:var(--muted); font-size:11px; margin-bottom:10px;
+    font-family:ui-monospace,Menlo,monospace; }
+  #details table { font-size:12px; }
+  #details td:first-child { color:var(--muted); }
+  .swatch { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; vertical-align:middle; }
+  .empty { color:var(--muted); padding:20px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>ThreadX <span style="color:var(--accent)">TraceX</span> Viewer</h1>
+    <div id="summary">no trace loaded</div>
+    <div class="spacer"></div>
+    <div class="ctl">clock <input id="clock" type="number" value="25" min="0.001" step="1"> MHz</div>
+    <button id="pleft" title="Pan left (←)">◀</button>
+    <button id="pright" title="Pan right (→)">▶</button>
+    <button id="zout" title="Zoom out (-)">−</button>
+    <button id="zin" title="Zoom in (+)">+</button>
+    <button id="fit" title="Fit all (0)">Fit</button>
+    <button id="open">Open .trx…</button>
+    <input id="file" type="file" accept=".trx,application/octet-stream" hidden>
+  </header>
+  <div class="tabs">
+    <div class="tab active" data-view="timeline">Timeline</div>
+    <div class="tab" data-view="sequential">Sequential</div>
+    <div class="tab" data-view="stats">Stats</div>
+  </div>
+  <main>
+    <div id="views">
+      <div class="view active" data-view="timeline">
+        <div id="tlWrap"><canvas id="timeline"></canvas></div>
+        <div class="hint">scroll or +/− = zoom · drag or ←/→ = pan · 0 = fit · click a marker for details</div>
+      </div>
+      <div class="view" data-view="sequential"><div id="seq" class="empty">Load a trace.</div></div>
+      <div class="view" data-view="stats"><div id="stats" class="empty">Load a trace.</div></div>
+      <div id="drop">
+        <div class="big">Drop a <b>.trx</b> file here</div>
+        <div>or click “Open .trx…”. Everything runs locally in your browser.</div>
+      </div>
+    </div>
+    <div id="details"><div class="empty">Select an event to see decoded fields.</div></div>
+  </main>
+</div>
+<div id="tip"></div>
+
+<script>
+"use strict";
+const EV = window.TX_EVENTS || {};
+const OBJT = window.TX_OBJECT_TYPES || {};
+const PALETTE = ["#4e9bff","#59c07b","#e0655f","#f0923a","#b98cd0","#4fc3c0",
+                 "#e6c84a","#ff9db0","#a98b76","#8fbf5f","#6f8fd8","#d98cc0"];
+
+let TR = null;             // current trace model
+let selIndex = -1;
+let clockMhz = 25;
+
+// ---------------------------------------------------------------- parsing ----
+const MAGIC = 0x54585442;
+
+function parseTrx(buf) {
+  const dv = new DataView(buf);
+  if (buf.byteLength < 48) throw new Error("file too small");
+  const u = (o) => dv.getUint32(o, true);
+  const h = {
+    id:u(0), timerMask:u(4), base:u(8), regStart:u(12),
+    nameSize:dv.getUint16(18, true), regEnd:u(20),
+    bufStart:u(24), bufEnd:u(28), bufCur:u(32),
+  };
+  if (h.id !== MAGIC) throw new Error("not a TraceX file (bad magic 0x"+h.id.toString(16)+")");
+  const off = (p) => p - h.base;
+
+  // Object registry: 48-byte entries.
+  const reg = new Map();
+  const nameLen = h.nameSize || 32;
+  for (let o = off(h.regStart); o + 48 <= off(h.regEnd) && o + 48 <= buf.byteLength; o += 48) {
+    const tptr = u(o + 4), type = dv.getUint8(o + 1);
+    if (tptr === 0) continue;
+    let s = "";
+    for (let i = 0; i < nameLen; i++) { const c = dv.getUint8(o + 16 + i); if (!c) break; s += String.fromCharCode(c); }
+    if (s) reg.set(tptr, { name:s, type });
+  }
+
+  // Event buffer: 32-byte circular entries.
+  const start = off(h.bufStart), n = (off(h.bufEnd) - start) / 32;
+  const cur = (off(h.bufCur) - start) / 32;
+  const rd = (i) => {
+    const o = start + i * 32;
+    return { tptr:u(o), pri:u(o+4), eid:u(o+8), ts:u(o+12),
+             info:[u(o+16),u(o+20),u(o+24),u(o+28)] };
+  };
+  let wrapped = false;
+  if (cur >= 0 && cur < n) { const e = rd(cur); wrapped = !(e.eid === 0 && e.tptr === 0); }
+  const order = wrapped
+    ? [...Array(n - cur).keys()].map(i => i + cur).concat([...Array(cur).keys()])
+    : [...Array(cur).keys()];
+
+  const rawEvents = [];
+  for (const i of order) { const e = rd(i); if (e.eid === 0 && e.tptr === 0) continue; rawEvents.push(e); }
+
+  return { h, reg, rawEvents, wrapped };
+}
+
+function threadName(reg, ptr) {
+  const o = reg.get(ptr);
+  if (o) return o.name;
+  if (ptr === 0xF0F0F0F0) return "[init]";
+  if (ptr === 0 || ptr === 0xFFFFFFFF) return "[system]";
+  return "0x" + ptr.toString(16).toUpperCase().padStart(8, "0");
+}
+
+// Build the derived model (timestamps, spans, lanes) for a given clock.
+function buildModel(p, mhz) {
+  const span = (p.h.timerMask >>> 0) + 1;  // 0x1_0000_0000 for a full 32-bit timer
+  const rows = [];
+  let prev = null, accum = 0, t0 = null;
+  for (const e of p.rawEvents) {
+    if (prev !== null && e.ts < prev) accum += span;
+    prev = e.ts;
+    const ticks = accum + e.ts;
+    if (t0 === null) t0 = ticks;
+    rows.push({ ...e, t_us:(ticks - t0) / mhz, thread:threadName(p.reg, e.tptr) });
+  }
+  for (let k = 0; k < rows.length; k++) rows[k].delta = k ? rows[k].t_us - rows[k-1].t_us : 0;
+
+  const totalUs = rows.length ? rows[rows.length - 1].t_us : 0;
+
+  // Per-thread priority from THREAD_CREATE (id 100): info1 = thread ptr, info2 = priority.
+  // (The per-entry thread_priority field is not a usable priority.)
+  const prio = {};
+  for (const r of rows) if (r.eid === 100) prio[threadName(p.reg, r.info[0])] = r.info[1];
+
+  // lanes: SysTick first (top), then threads, then other ISRs, then system/unknown.
+  const lanes = [];
+  for (const r of rows) { const L = laneOf(r); if (!lanes.includes(L)) lanes.push(L); }
+  const rank = (n) => n === "SysTick" ? 0 : n.startsWith("ISR ") ? 3 : (n[0]==="["||n[0]==="0") ? 4 : 1;
+  lanes.sort((a,b) => rank(a) - rank(b));
+
+  // execution spans: interval owned by the thread running at its start
+  const spans = [];
+  for (let k = 0; k < rows.length - 1; k++)
+    spans.push({ thread:rows[k].thread, t0:rows[k].t_us, t1:rows[k+1].t_us });
+
+  return { ...p, rows, totalUs, lanes, spans, prio };
+}
+
+// ISR enter/exit (ids 3/4) go on a synthetic lane; ISR id 15 = SysTick.
+function laneOf(r) {
+  if (r.eid === 3 || r.eid === 4) { const id = r.info[1] >>> 0; return id === 15 ? "SysTick" : ("ISR " + id); }
+  return r.thread;
+}
+function laneColor(thread) {
+  if (thread === "SysTick" || thread.startsWith("ISR ")) return "#b98cd0";
+  if (thread[0] === "[" || thread[0] === "0") return "#7d868f";
+  return PALETTE[TR.lanes.indexOf(thread) % PALETTE.length];
+}
+function evDef(eid) {
+  return EV[String(eid)] || { name:"event_"+eid, icon:"?", color:"#888", fields:[null,null,null,null] };
+}
+function hex(v){ return "0x"+(v>>>0).toString(16).toUpperCase().padStart(8,"0"); }
+function fmtUs(us){ return us >= 1000 ? (us/1000).toFixed(3)+" ms" : us.toFixed(2)+" µs"; }
+
+// -------------------------------------------------------------- timeline ----
+const cv = document.getElementById("timeline");
+const cx = cv.getContext("2d");
+let view = { a:0, b:1 };            // visible time window [a,b] in µs
+let dragging = null;
+const GUT = 150, TOP = 34, LANE_H = 26, LANE_GAP = 6;
+
+function fitView(){ if (TR) { view = { a:0, b:Math.max(TR.totalUs, 1) }; drawTimeline(); } }
+function zoomBy(f){                       // f<1 zoom in, f>1 zoom out (around center)
+  if (!TR) return;
+  const c = (view.a + view.b) / 2, half = (view.b - view.a) * f / 2;
+  let a = c - half, b = c + half;
+  a = Math.max(a, -TR.totalUs*0.02); b = Math.min(b, TR.totalUs*1.02);
+  if (b - a > 1e-3) { view = { a, b }; drawTimeline(); }
+}
+function panBy(frac){                      // frac<0 pan left, >0 pan right (of window)
+  if (!TR) return;
+  const span = view.b - view.a, lo = -0.02*TR.totalUs, hi = 1.02*TR.totalUs;
+  let a = view.a + span*frac, b = a + span;
+  if (a < lo) { a = lo; b = lo + span; }
+  if (b > hi) { b = hi; a = hi - span; }
+  view = { a, b }; drawTimeline();
+}
+
+function drawTimeline() {
+  if (!TR) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = w * dpr; cv.height = h * dpr;
+  cx.setTransform(dpr,0,0,dpr,0,0);
+  cx.clearRect(0,0,w,h);
+  const plotW = w - GUT - 10;
+  const span = view.b - view.a || 1;
+  const X = (t) => GUT + (t - view.a) / span * plotW;
+
+  // axis grid
+  cx.font = "11px ui-monospace,Menlo,monospace";
+  const step = niceStep(span / 8);
+  cx.textAlign = "center";
+  for (let t = Math.ceil(view.a/step)*step; t <= view.b; t += step) {
+    const x = X(t);
+    cx.strokeStyle = "#333a42"; cx.beginPath(); cx.moveTo(x,TOP-8); cx.lineTo(x,h); cx.stroke();
+    cx.fillStyle = "#9aa4b1"; cx.fillText((t/1000).toFixed(step<1000?3:2)+" ms", x, TOP-12);
+  }
+
+  // lanes
+  TR.lanes.forEach((name, i) => {
+    const y = TOP + i * (LANE_H + LANE_GAP);
+    cx.fillStyle = "#e6e9ee"; cx.textAlign = "left";
+    const p = TR.prio[name];
+    let lbl = name + (p !== undefined ? "  [" + p + "]" : "");
+    cx.fillText(lbl.length > 22 ? lbl.slice(0,21)+"…" : lbl, 8, y + LANE_H*0.66);
+    cx.strokeStyle = "#2b3138"; cx.beginPath(); cx.moveTo(GUT, y+LANE_H); cx.lineTo(w, y+LANE_H); cx.stroke();
+  });
+  const laneY = (name) => TOP + TR.lanes.indexOf(name) * (LANE_H + LANE_GAP);
+
+  // execution spans
+  for (const s of TR.spans) {
+    if (s.t1 < view.a || s.t0 > view.b) continue;
+    const y = laneY(s.thread); if (y < TOP) continue;
+    const x0 = Math.max(X(s.t0), GUT), x1 = Math.min(X(s.t1), w-10);
+    cx.fillStyle = laneColor(s.thread) + "aa";
+    cx.fillRect(x0, y+5, Math.max(x1-x0, 0.7), LANE_H-10);
+  }
+
+  // event markers
+  clip(GUT, 0, plotW+10, h, () => {
+    for (let k = 0; k < TR.rows.length; k++) {
+      const r = TR.rows[k];
+      if (r.t_us < view.a || r.t_us > view.b) continue;
+      const y = laneY(laneOf(r)); if (y < TOP) continue;
+      const x = X(r.t_us);
+      cx.strokeStyle = k === selIndex ? "#ffb454" : evDef(r.eid).color;
+      cx.lineWidth = k === selIndex ? 2 : 1;
+      cx.beginPath(); cx.moveTo(x, y+2); cx.lineTo(x, y+LANE_H-2); cx.stroke();
+    }
+    cx.lineWidth = 1;
+  });
+}
+function clip(x,y,w,h,fn){ cx.save(); cx.beginPath(); cx.rect(x,y,w,h); cx.clip(); fn(); cx.restore(); }
+function niceStep(raw){ const p=Math.pow(10,Math.floor(Math.log10(raw))); const f=raw/p;
+  return (f<1.5?1:f<3.5?2:f<7.5?5:10)*p; }
+
+function eventAt(px, py) {
+  if (!TR) return -1;
+  const plotW = cv.clientWidth - GUT - 10, span = view.b - view.a || 1;
+  const X = (t) => GUT + (t - view.a) / span * plotW;
+  let best = -1, bestDx = 6;
+  for (let k = 0; k < TR.rows.length; k++) {
+    const r = TR.rows[k];
+    const y = TOP + TR.lanes.indexOf(laneOf(r)) * (LANE_H + LANE_GAP);
+    if (py < y || py > y + LANE_H) continue;
+    const dx = Math.abs(X(r.t_us) - px);
+    if (dx < bestDx) { bestDx = dx; best = k; }
+  }
+  return best;
+}
+
+// mouse: zoom / pan / hover / click
+cv.addEventListener("wheel", (e) => {
+  if (!TR) return; e.preventDefault();
+  const plotW = cv.clientWidth - GUT - 10;
+  const frac = Math.min(Math.max((e.offsetX - GUT) / plotW, 0), 1);
+  const t = view.a + frac * (view.b - view.a);
+  const f = e.deltaY < 0 ? 0.82 : 1.22;
+  let a = t - (t - view.a) * f, b = t + (view.b - t) * f;
+  a = Math.max(a, -TR.totalUs*0.02); b = Math.min(b, TR.totalUs*1.02);
+  if (b - a > 1e-3) { view = { a, b }; drawTimeline(); }
+}, { passive:false });
+cv.addEventListener("mousedown", (e) => { dragging = { x:e.offsetX, a:view.a, b:view.b, moved:false }; });
+window.addEventListener("mouseup", () => { dragging = null; });
+cv.addEventListener("mousemove", (e) => {
+  const tip = document.getElementById("tip");
+  if (dragging) {
+    const plotW = cv.clientWidth - GUT - 10, span = dragging.b - dragging.a;
+    const dt = (e.offsetX - dragging.x) / plotW * span;
+    dragging.moved = true;
+    view = { a: dragging.a - dt, b: dragging.b - dt }; drawTimeline(); tip.style.display="none"; return;
+  }
+  const k = eventAt(e.offsetX, e.offsetY);
+  if (k < 0) { tip.style.display = "none"; return; }
+  const r = TR.rows[k], d = evDef(r.eid);
+  let s = d.icon+"  "+d.name+"\n"+r.thread+"  @ "+fmtUs(r.t_us);
+  d.fields.forEach((f,i) => { if (f) s += "\n"+f+" = "+fmtVal(r.info[i]); });
+  tip.textContent = s; tip.style.display = "block";
+  tip.style.left = (e.clientX + 14) + "px"; tip.style.top = (e.clientY + 14) + "px";
+});
+cv.addEventListener("click", (e) => {
+  if (dragging && dragging.moved) return;
+  const k = eventAt(e.offsetX, e.offsetY);
+  if (k >= 0) select(k);
+});
+
+// ------------------------------------------------------------ sequential ----
+function fmtVal(v) {
+  const o = TR.reg.get(v >>> 0);
+  return hex(v) + (o ? " ("+o.name+")" : (v < 100000 ? "  ="+v : ""));
+}
+function renderSequential() {
+  if (!TR) return;
+  let html = "<table><thead><tr><th>#</th><th>Time</th><th>Δ µs</th><th>Thread</th>"
+    + "<th>Event</th><th>Details</th></tr></thead><tbody>";
+  for (let k = 0; k < TR.rows.length; k++) {
+    const r = TR.rows[k], d = evDef(r.eid);
+    const det = d.fields.map((f,i) => f ? f+"="+shortVal(r.info[i]) : null).filter(Boolean).join(", ");
+    html += `<tr data-k="${k}"${k===selIndex?' class="sel"':''}>`
+      + `<td>${k}</td><td>${(r.t_us/1000).toFixed(3)} ms</td><td>${r.delta.toFixed(1)}</td>`
+      + `<td><span class="swatch" style="background:${laneColor(r.thread)}"></span>${esc(r.thread)}</td>`
+      + `<td><span class="icon" style="background:${d.color}">${esc(d.icon)}</span> ${esc(d.name)}</td>`
+      + `<td>${esc(det)}</td></tr>`;
+  }
+  html += "</tbody></table>";
+  const el = document.getElementById("seq"); el.className = ""; el.innerHTML = html;
+  el.querySelectorAll("tr[data-k]").forEach(tr =>
+    tr.addEventListener("click", () => select(+tr.dataset.k)));
+}
+function shortVal(v){ const o = TR.reg.get(v>>>0); return o ? o.name : (v < 100000 ? String(v) : hex(v)); }
+
+// ----------------------------------------------------------------- stats ----
+function renderStats() {
+  if (!TR) return;
+  const run = {}, cnt = {};
+  TR.lanes.forEach(n => { run[n]=0; cnt[n]=0; });
+  for (const s of TR.spans) run[s.thread] = (run[s.thread]||0) + (s.t1 - s.t0);
+  for (const r of TR.rows) cnt[r.thread] = (cnt[r.thread]||0) + 1;
+  let ctx = 0; for (let k=1;k<TR.rows.length;k++) if (TR.rows[k].tptr !== TR.rows[k-1].tptr) ctx++;
+  const total = TR.totalUs || 1;
+
+  const evCount = {}; for (const r of TR.rows) { const n = evDef(r.eid).name; evCount[n]=(evCount[n]||0)+1; }
+  const topEv = Object.entries(evCount).sort((a,b)=>b[1]-a[1]);
+
+  let html = '<div class="stat-grid">';
+  html += `<div class="card"><h3>Overview</h3><table>
+    <tr><td>Duration</td><td>${(total/1000).toFixed(3)} ms</td></tr>
+    <tr><td>Events</td><td>${TR.rows.length}</td></tr>
+    <tr><td>Context switches</td><td>${ctx}</td></tr>
+    <tr><td>Threads/objects</td><td>${TR.reg.size}</td></tr>
+    <tr><td>Buffer wrapped</td><td>${TR.wrapped ? "yes" : "no"}</td></tr></table></div>`;
+
+  html += '<div class="card"><h3>CPU time by thread</h3><table>'
+    + '<tr><th>Thread</th><th>Prio</th><th>Time</th><th>%</th><th></th><th>Events</th></tr>';
+  TR.lanes.slice().sort((a,b)=>(run[b]||0)-(run[a]||0)).forEach(n => {
+    const pct = (run[n]||0)/total*100;
+    const p = TR.prio[n];
+    html += `<tr><td><span class="swatch" style="background:${laneColor(n)}"></span>${esc(n)}</td>`
+      + `<td>${p!==undefined ? p : "—"}</td>`
+      + `<td>${(run[n]||0).toFixed(0)} µs</td><td>${pct.toFixed(1)}%</td>`
+      + `<td style="width:120px"><div class="bar" style="width:${Math.max(pct,0.5)}%;background:${laneColor(n)}"></div></td>`
+      + `<td>${cnt[n]||0}</td></tr>`;
+  });
+  html += '</table></div>';
+
+  html += '<div class="card"><h3>Objects</h3><table><tr><th>Name</th><th>Type</th><th>Ptr</th></tr>';
+  [...TR.reg.entries()].forEach(([ptr,o]) =>
+    html += `<tr><td>${esc(o.name)}</td><td>${OBJT[String(o.type)]||o.type}</td><td>${hex(ptr)}</td></tr>`);
+  html += '</table></div>';
+
+  html += '<div class="card"><h3>Event counts</h3><table>';
+  topEv.forEach(([n,c]) => html += `<tr><td>${esc(n)}</td><td>${c}</td></tr>`);
+  html += '</table></div></div>';
+
+  const el = document.getElementById("stats"); el.className=""; el.innerHTML = html;
+}
+
+// --------------------------------------------------------------- details ----
+function renderDetails() {
+  const el = document.getElementById("details");
+  if (selIndex < 0 || !TR) { el.innerHTML = '<div class="empty">Select an event to see decoded fields.</div>'; return; }
+  const r = TR.rows[selIndex], d = evDef(r.eid);
+  let html = `<h3><span class="swatch" style="background:${d.color}"></span>${esc(d.name)}</h3>`;
+  html += `<div class="sub">#${selIndex} · id ${r.eid} · ${fmtUs(r.t_us)} · Δ ${r.delta.toFixed(1)} µs</div>`;
+  html += `<table><tr><td>Thread</td><td>${esc(r.thread)}</td></tr>`;
+  const tp = TR.prio[r.thread];
+  html += `<tr><td>Thread priority</td><td>${tp !== undefined ? tp : "—"}</td></tr>`;
+  for (let i = 0; i < 4; i++) {
+    const label = d.fields[i] || ("Info"+(i+1));
+    html += `<tr><td>${esc(label)}</td><td>${esc(fmtVal(r.info[i]))}</td></tr>`;
+  }
+  html += `</table>`;
+  el.innerHTML = html;
+}
+
+// ------------------------------------------------------------ selection ----
+function select(k) {
+  selIndex = k;
+  renderDetails(); drawTimeline();
+  const row = document.querySelector(`#seq tr[data-k="${k}"]`);
+  document.querySelectorAll("#seq tr.sel").forEach(t => t.classList.remove("sel"));
+  if (row) { row.classList.add("sel"); row.scrollIntoView({ block:"nearest" }); }
+}
+
+// --------------------------------------------------------------- wiring ----
+function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+function loadBuffer(buf) {
+  let parsed;
+  try { parsed = parseTrx(buf); }
+  catch (e) { alert("Could not parse .trx: " + e.message); return; }
+  TR = buildModel(parsed, clockMhz);
+  selIndex = -1;
+  document.getElementById("drop").classList.add("hidden");
+  document.getElementById("summary").textContent =
+    `${TR.rows.length} events · ${(TR.totalUs/1000).toFixed(3)} ms · ${TR.reg.size} objects`
+    + (TR.wrapped ? " · wrapped" : "");
+  fitView(); renderSequential(); renderStats(); renderDetails();
+}
+function reModel() {   // re-scale when clock changes (keeps raw parse)
+  if (!TR) return;
+  TR = buildModel(TR, clockMhz);   // TR still has h/reg/rawEvents
+  fitView(); renderSequential(); renderStats(); renderDetails();
+}
+
+document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => {
+  const v = tab.dataset.view;
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t === tab));
+  document.querySelectorAll(".view").forEach(el => el.classList.toggle("active", el.dataset.view === v));
+  if (v === "timeline") drawTimeline();
+}));
+document.getElementById("open").onclick = () => document.getElementById("file").click();
+document.getElementById("file").onchange = (e) => { const f = e.target.files[0]; if (f) f.arrayBuffer().then(loadBuffer); };
+document.getElementById("fit").onclick = fitView;
+document.getElementById("zin").onclick = () => zoomBy(0.6);
+document.getElementById("zout").onclick = () => zoomBy(1.6);
+document.getElementById("pleft").onclick = () => panBy(-0.25);
+document.getElementById("pright").onclick = () => panBy(0.25);
+window.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT") return;
+  if (e.key === "+" || e.key === "=") zoomBy(0.6);
+  else if (e.key === "-" || e.key === "_") zoomBy(1.6);
+  else if (e.key === "0") fitView();
+  else if (e.key === "ArrowLeft") { panBy(-0.2); e.preventDefault(); }
+  else if (e.key === "ArrowRight") { panBy(0.2); e.preventDefault(); }
+});
+document.getElementById("clock").onchange = (e) => { clockMhz = parseFloat(e.target.value) || 25; reModel(); };
+
+const drop = document.getElementById("drop");
+["dragenter","dragover"].forEach(ev => document.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hover"); }));
+["dragleave","drop"].forEach(ev => document.addEventListener(ev, e => { e.preventDefault(); if (ev==="drop"||e.target===document) drop.classList.remove("hover"); }));
+document.addEventListener("drop", e => {
+  e.preventDefault(); drop.classList.remove("hover");
+  const f = e.dataTransfer.files[0]; if (f) f.arrayBuffer().then(loadBuffer);
+});
+window.addEventListener("resize", drawTimeline);
+</script>
+</body>
+</html>
